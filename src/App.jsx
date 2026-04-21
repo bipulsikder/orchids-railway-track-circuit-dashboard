@@ -1,62 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ReferenceLine, ReferenceArea, ResponsiveContainer, Legend,
+  ReferenceLine, ReferenceArea, ResponsiveContainer
 } from "recharts";
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-const V_MIN = 2.4,  V_MAX = 4.0;
-const I_MIN = 0.50, I_MAX = 1.50;   // Amps – DC track circuit typical range
-const MAX_HISTORY = 20;
-
-const GPS = { lat: "19.0760", lon: "72.8777", place: "Mumbai Central Railway Yard", section: "T-14" };
-
-function isVFault(v)  { return v < V_MIN || v > V_MAX; }
-function isIFault(i)  { return i < I_MIN || i > I_MAX; }
-function vFaultType(v){ return v < V_MIN ? "UNDER-VOLTAGE" : "OVER-VOLTAGE"; }
-function iFaultType(i){ return i < I_MIN ? "UNDER-CURRENT" : "OVER-CURRENT"; }
-
-function ts() {
-  return new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-}
-function tsDate() {
-  return new Date().toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-  });
-}
-
-// current correlates loosely with voltage (V / ~3 Ω track impedance) + noise
-function currentFromVoltage(v) {
-  const base = v / 2.9;
-  return +Math.max(0, base + (Math.random() - 0.5) * 0.08).toFixed(3);
-}
-function randomNormal() { return +(2.5 + Math.random() * 1.3).toFixed(3); }
-function randomFault()  {
-  return Math.random() < 0.5
-    ? +(1.2 + Math.random() * 1.1).toFixed(3)
-    : +(4.1 + Math.random() * 1.4).toFixed(3);
-}
-
-// ─── Web-Audio alarm (single beep) ────────────────────────────────────────────
-function playAlarm() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const beepAt = (t, freq, dur) => {
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.frequency.value = freq;
-      o.type = "square";
-      g.gain.setValueAtTime(0.18, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-      o.start(t); o.stop(t + dur);
-    };
-    beepAt(ctx.currentTime,       880, 0.12);
-    beepAt(ctx.currentTime + 0.15, 660, 0.12);
-    beepAt(ctx.currentTime + 0.30, 880, 0.18);
-  } catch (_) {}
-}
+import { Routes, Route } from "react-router-dom";
+import UploadPanel from "./components/UploadPanel";
+import { supabase } from "./supabaseClient";
+import {
+  V_MIN, V_MAX, I_MIN, I_MAX, MAX_HISTORY, TRACK_CIRCUITS,
+  isVFault, isIFault, vFaultType, iFaultType, ts, tsDate,
+  currentFromVoltage, playAlarm
+} from "./constants";
 
 // ─── InfoTooltip ──────────────────────────────────────────────────────────────
 function InfoTooltip({ title, rows, position = "bottom" }) {
@@ -224,9 +178,9 @@ function SMSCard({ log }) {
       </div>
       <div className="text-[#8b949e] whitespace-pre-wrap leading-5">
         <span className="text-[#00bfff]">[ALERT]</span> Indian Railways Track Circuit{"\n"}
-        <span className="text-[#8b949e]">Location :</span> <span className="text-[#c9d1d9]">{GPS.place}</span>{"\n"}
-        <span className="text-[#8b949e]">Section  :</span> <span className="text-[#c9d1d9]">Track {GPS.section}</span>{"\n"}
-        <span className="text-[#8b949e]">GPS      :</span> <span className="text-[#c9d1d9]">{GPS.lat}°N, {GPS.lon}°E</span>{"\n"}
+        <span className="text-[#8b949e]">Location :</span> <span className="text-[#c9d1d9]">{log.gps?.place}</span>{"\n"}
+        <span className="text-[#8b949e]">Section  :</span> <span className="text-[#c9d1d9]">Track {log.gps?.section}</span>{"\n"}
+        <span className="text-[#8b949e]">GPS      :</span> <span className="text-[#c9d1d9]">{log.gps?.lat}°N, {log.gps?.lon}°E</span>{"\n"}
         <span className="text-[#8b949e]">Voltage  :</span> <span className="text-red-400 font-bold">{log.voltage?.toFixed(3)} V</span>{"\n"}
         <span className="text-[#8b949e]">Current  :</span> <span className="text-red-400 font-bold">{log.current?.toFixed(3)} A</span>{"\n"}
         <span className="text-[#8b949e]">Fault    :</span> <span className="text-orange-400 font-bold">{log.faultType}</span>{"\n"}
@@ -238,9 +192,9 @@ function SMSCard({ log }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MAIN APP
+// DASHBOARD VIEW
 // ══════════════════════════════════════════════════════════════════════════════
-export default function App() {
+function Dashboard() {
   const [history, setHistory]       = useState([]);
   const [voltage, setVoltage]       = useState(3.24);
   const [current, setCurrent]       = useState(1.12);
@@ -256,6 +210,8 @@ export default function App() {
   const [clock, setClock]           = useState("");
   const [lastSMS, setLastSMS]       = useState(null);
   const [alarmOn, setAlarmOn]       = useState(false);
+  const [selectedCircuitId, setSelectedCircuitId] = useState(1);
+  const currentCircuit = TRACK_CIRCUITS.find(c => c.id === selectedCircuitId) || TRACK_CIRCUITS[0];
 
   const autoRef  = useRef(null);
   const resetRef = useRef(null);
@@ -282,10 +238,9 @@ export default function App() {
   const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
 
   // ── Core push ──
-  const push = useCallback((rawV) => {
-    const v   = +Math.max(0, Math.min(6, parseFloat(rawV))).toFixed(3);
+  const push = useCallback((v, iOverride) => {
     if (isNaN(v)) return;
-    const i   = currentFromVoltage(v);
+    const i   = iOverride ?? currentFromVoltage(v);
     const vBad = isVFault(v);
     const iBad = isIFault(i);
     const fault = vBad || iBad;
@@ -319,6 +274,7 @@ export default function App() {
         voltage: v, current: i,
         faultType: vBad ? vFaultType(v) : iFaultType(i),
         faults,
+        gps: currentCircuit
       };
       setAlertLog(prev => [entry, ...prev]);
       setLastSMS(entry);
@@ -329,6 +285,27 @@ export default function App() {
 
     setStats(p => ({ total: p.total+1, normal: p.normal+(fault?0:1), faults: p.faults+(fault?1:0) }));
   }, []);
+
+  // Sync state with Supabase Realtime to respond to /upload tab pushes globally
+  useEffect(() => {
+    const channel = supabase.channel('track-telemetry', {
+      config: { broadcast: { ack: true } }
+    });
+    
+    channel.on('broadcast', { event: 'push_reading' }, (payload) => {
+      console.log('Dashboard received payload:', payload);
+      const { v, i } = payload.payload;
+      if (typeof v === 'number' && typeof i === 'number') {
+        push(v, i);
+      }
+    }).subscribe(status => {
+      console.log('Dashboard Broadcast Status:', status);
+    });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [push]);
 
   // Auto sim
   useEffect(() => {
@@ -385,7 +362,6 @@ export default function App() {
       dashFlash ? "ring-4 ring-inset ring-red-500 shadow-[0_0_40px_rgba(239,68,68,0.4)]" : ""
     }`}>
 
-      {/* ══ NAVBAR ══ */}
       <nav className="bg-[#161b22] border-b border-[#30363d] px-5 py-3 flex items-center justify-between flex-shrink-0 z-20">
         <div className="flex items-center gap-3">
           <span className="text-2xl">🚆</span>
@@ -394,25 +370,36 @@ export default function App() {
             <div className="text-[#8b949e] text-[10px]">Indian Railways · DC Track Circuit · Voltage & Current · Remote Diagnostics</div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <LED on={!anyFault} fault={anyFault} size="md" />
+        <div className="flex items-center gap-6">
+          
+          <select 
+            value={selectedCircuitId}
+            onChange={(e) => setSelectedCircuitId(parseInt(e.target.value))}
+            className="bg-[#0d1117] text-[#00bfff] text-xs font-bold font-mono px-3 py-1.5 rounded-lg border border-[#30363d] focus:outline-none focus:border-[#00bfff]/60 transition-all cursor-pointer"
+          >
+            {TRACK_CIRCUITS.map(c => (
+              <option key={c.id} value={c.id}>{c.name.toUpperCase()} • {c.section}</option>
+            ))}
+          </select>
+
+          <div className="flex items-center gap-3">
+            <LED on={!anyFault} fault={anyFault} size="md" />
           <LiveDot />
           <InfoTooltip position="bottom" title="System Status Indicator" rows={[
             { icon: "🟢", label: "Green LED", text: "Both voltage (2.4–4.0V) and current (0.5–1.5A) are within safe operating range. Track section is clear and all systems normal." },
             { icon: "🔴", label: "Red LED flashing", text: "One or both parameters are outside safe range. Alarm has been triggered and SMS dispatched to Maintenance Officer." },
             { icon: "📡", label: "LIVE indicator", text: "Dashboard is connected and receiving data. In production this reflects the 4G link to the STM32 field unit." },
           ]} />
+          </div>
         </div>
         <div className="font-mono text-[#8b949e] text-sm tabular-nums">{clock}</div>
       </nav>
 
       {/* ══ BODY ══ */}
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 container mx-auto max-w-6xl">
 
-        {/* ████████  LEFT — MONITORING DASHBOARD (70%)  ████████ */}
-        <div className={`w-[70%] flex flex-col gap-3 p-4 overflow-y-auto border-r transition-all duration-300 ${
-          anyFault ? "border-red-500/30" : "border-[#30363d]"
-        }`}>
+        {/* ████████  MAIN DASHBOARD  ████████ */}
+        <div className={`w-full flex flex-col gap-3 p-4 overflow-y-auto transition-all duration-300`}>
 
           {/* ALARM BANNER */}
           <AlarmBanner active={anyFault} faults={activeFaults} />
@@ -549,7 +536,7 @@ export default function App() {
               <div className={`text-[10px] w-fit px-2 py-0.5 rounded-full border ${anyFault ? "bg-red-500/10 text-red-400 border-red-500/30" : "bg-green-500/10 text-green-400 border-green-500/30"}`}>
                 {anyFault ? "Signal: RED 🔴" : "Signal: GREEN 🟢"}
               </div>
-              <div className="text-[#484f58] text-[10px]">QTA2 Track Relay</div>
+              <div className="text-[#484f58] text-[10px] uppercase font-bold">{currentCircuit.name}</div>
             </div>
 
             {/* System condition */}
@@ -588,9 +575,9 @@ export default function App() {
                 ],
               }} />
               <div className="font-mono text-xs text-[#c9d1d9] font-semibold">
-                📍 {GPS.lat}° N<br />&nbsp;&nbsp;&nbsp;&nbsp;{GPS.lon}° E
+                📍 {currentCircuit.lat}° N<br />&nbsp;&nbsp;&nbsp;&nbsp;{currentCircuit.lon}° E
               </div>
-              <div className="text-[#484f58] text-[10px]">{GPS.place} · {GPS.section}</div>
+              <div className="text-[#484f58] text-[10px]">{currentCircuit.place} · {currentCircuit.section}</div>
               <div className="flex items-center gap-1.5 mt-auto">
                 <SigBars />
                 <span className="text-green-400 text-[10px] font-bold">4G ●●●● Connected</span>
@@ -621,8 +608,7 @@ export default function App() {
             {history.length === 0 ? (
               <div className="h-[240px] flex flex-col items-center justify-center gap-2 text-[#484f58]">
                 <span className="text-2xl">📡</span>
-                <span className="text-sm">Push a reading to populate the chart</span>
-                <span className="text-[10px]">Use the Operator Panel on the right →</span>
+                <span className="text-sm">Push a reading from /upload to populate the chart</span>
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
@@ -762,8 +748,8 @@ export default function App() {
               </div>
               <div className="flex flex-col items-center py-5">
                 <div className="text-5xl mb-3 drop-shadow-[0_0_20px_rgba(0,191,255,0.5)]">📡</div>
-                <div className="font-mono text-2xl font-bold text-[#00bfff] tracking-wider">{GPS.lat}° N &nbsp;|&nbsp; {GPS.lon}° E</div>
-                <div className="text-[#8b949e] text-sm mt-2">{GPS.place} — Track Section {GPS.section}</div>
+                <div className="font-mono text-2xl font-bold text-[#00bfff] tracking-wider">{currentCircuit.lat}° N &nbsp;|&nbsp; {currentCircuit.lon}° E</div>
+                <div className="text-[#8b949e] text-sm mt-2">{currentCircuit.place} — Track Section {currentCircuit.section}</div>
                 <div className="mt-4 flex flex-wrap justify-center gap-2">
                   <span className="bg-green-500/10 text-green-400 text-xs px-3 py-1 rounded-full border border-green-500/30">● GPS Fix Acquired</span>
                   <span className="bg-[#00bfff]/10 text-[#00bfff] text-xs px-3 py-1 rounded-full border border-[#00bfff]/30">● HDOP: 0.9 (Excellent)</span>
@@ -789,219 +775,16 @@ export default function App() {
             <div className="text-[#484f58] text-[10px]">Hardware procurement pending · Software Prototype v1.0</div>
           </div>
         </div>
-
-        {/* ████████  RIGHT — OPERATOR PANEL (30%)  ████████ */}
-        <div className="w-[30%] flex flex-col gap-3 p-4 overflow-y-auto bg-[#0d1117]">
-
-          <div className="flex items-center gap-2 pb-2 border-b border-[#30363d]">
-            <span className="text-white font-bold text-sm">🎛️ Operator Control Panel</span>
-            <InfoTooltip position="bottom" title="Operator Panel — Purpose" rows={[
-              { icon: "🎛️", label: "Demo interface", text: "Simulates the voltage readings that the physical STM32 field unit would transmit over 4G every 3 seconds in production." },
-              { icon: "📡", label: "In production", text: "Replaced by a REST API endpoint. STM32 POSTs JSON: { voltage, current, lat, lon, timestamp } — the dashboard updates automatically." },
-              { icon: "🧪", label: "Use", text: "Manual entry for precise values, Slider for smooth sweeps, Quick Scenarios for instant fault demos, Auto Simulate for hands-free presentations." },
-            ]} />
-          </div>
-
-          {/* §1 Manual entry */}
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4">
-            <SecLabel text="§1 — Manual Voltage Entry" tooltip={{
-              title: "Manual Entry — Use Case",
-              rows: [
-                { icon: "✏️", label: "Purpose", text: "Enter any specific voltage reading (e.g., a value from a field multimeter measurement) to see exactly how the system would respond." },
-                { icon: "〰️", label: "Current auto-derived", text: "Current is automatically calculated as V ÷ 2.9Ω + small noise — mimicking the real sensor relationship." },
-                { icon: "⌨️", label: "Tip", text: "Press Enter to push instantly. Range: 0.000 – 6.000V at 1mV precision." },
-              ],
-            }} />
-            <label className="text-[#c9d1d9] text-xs mb-1.5 block">Enter Voltage Reading (V)</label>
-            <input
-              type="number" min={0} max={6} step={0.001} value={inputVal}
-              onChange={e => setInputVal(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && handlePush()}
-              placeholder="e.g. 3.240"
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2.5 font-mono text-xl text-[#00bfff] placeholder-[#484f58] focus:outline-none focus:border-[#00bfff]/60 transition-all duration-200 mb-3"
-            />
-            {/* Current preview */}
-            <div className="flex items-center justify-between mb-3 text-xs">
-              <span className="text-[#8b949e]">Derived current ≈</span>
-              <span className="font-mono text-emerald-400 font-bold">{(parseFloat(inputVal) / 2.9 || 0).toFixed(3)} A</span>
-            </div>
-            <button onClick={handlePush} className="w-full bg-[#00bfff]/10 hover:bg-[#00bfff]/20 active:scale-[0.98] text-[#00bfff] border border-[#00bfff]/40 rounded-lg px-4 py-2.5 text-sm font-bold transition-all duration-200">
-              📡 PUSH READING TO DASHBOARD
-            </button>
-            <div className={`mt-2 bg-green-500/10 border border-green-500/30 text-green-400 text-xs text-center rounded-lg py-1.5 font-semibold transition-all duration-300 ${toast ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
-              ✅ Reading Pushed Successfully
-            </div>
-          </div>
-
-          {/* §2 Slider */}
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4">
-            <SecLabel text="§2 — Drag to Set Voltage" tooltip={{
-              title: "Voltage Slider — Use Case",
-              rows: [
-                { icon: "🎚️", label: "Live update", text: "Dragging updates the entire left panel in real time — ideal for live presentations sweeping from normal → fault → normal." },
-                { icon: "🟢", label: "Green thumb", text: "Voltage within 2.4–4.0V safe band. Both LED indicators on the left will be green." },
-                { icon: "🔴", label: "Red thumb + alarm", text: "Exits safe range — LEDs turn red, alarm sounds once, and an Alert Log entry is created." },
-              ],
-            }} />
-            <div className="flex justify-between text-xs font-mono mb-1.5">
-              <span className="text-[#8b949e]">0 V</span>
-              <span className={`font-bold text-base transition-colors duration-300 ${sliderSafe ? "text-green-400" : "text-red-400"}`}>{slider.toFixed(3)} V</span>
-              <span className="text-[#8b949e]">6 V</span>
-            </div>
-            <input type="range" min={0} max={6} step={0.01} value={slider} onChange={handleSlider}
-              className="w-full h-2 rounded-full appearance-none cursor-pointer"
-              style={{
-                accentColor: sliderSafe ? "#22c55e" : "#ef4444",
-                background: `linear-gradient(to right,${sliderSafe?"#22c55e":"#ef4444"} ${(slider/6)*100}%,#21262d ${(slider/6)*100}%)`,
-              }}
-            />
-            <div className="mt-3 flex rounded-lg overflow-hidden text-[10px] font-bold h-7 border border-[#30363d]">
-              <div className="bg-red-500/20 text-red-400 flex items-center justify-center border-r border-[#21262d]" style={{width:`${(V_MIN/6)*100}%`}}>UNDER-V</div>
-              <div className="bg-green-500/20 text-green-400 flex items-center justify-center border-r border-[#21262d]" style={{width:`${((V_MAX-V_MIN)/6)*100}%`}}>✓ SAFE</div>
-              <div className="bg-red-500/20 text-red-400 flex items-center justify-center" style={{width:`${((6-V_MAX)/6)*100}%`}}>OVER-V</div>
-            </div>
-            <div className="mt-1 flex text-[9px] text-[#484f58] font-mono">
-              <div style={{width:`${(V_MIN/6)*100}%`}} className="text-center">0–2.4V</div>
-              <div style={{width:`${((V_MAX-V_MIN)/6)*100}%`}} className="text-center">2.4–4.0V</div>
-              <div style={{width:`${((6-V_MAX)/6)*100}%`}} className="text-center">4.0–6V</div>
-            </div>
-          </div>
-
-          {/* §3 Quick scenarios */}
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4">
-            <SecLabel text="§3 — Quick Demo Scenarios" tooltip={{
-              title: "Quick Scenarios — Use Case",
-              rows: [
-                { icon: "✅", label: "Normal (3.2V / ~1.10A)", text: "Baseline healthy reading. Relay energised, signal green, both LEDs green." },
-                { icon: "⚠️", label: "Under-Voltage (1.85V / ~0.64A)", text: "Simulates a train shunting the track. Relay drops, alarm beeps, SMS sent, LEDs red." },
-                { icon: "🚨", label: "Over-Voltage (4.75V / ~1.64A)", text: "Simulates transformer fault. Alarm triggers, log entry created." },
-                { icon: "🔄", label: "Auto Simulate", text: "85% normal / 15% fault every 3 seconds — hands-free continuous demonstration." },
-              ],
-            }} />
-            <div className="flex flex-col gap-2">
-              <button onClick={() => push(3.2)} className="w-full bg-green-500/10 hover:bg-green-500/20 active:scale-[0.98] text-green-400 border border-green-500/30 rounded-lg px-3 py-2.5 text-xs font-semibold transition-all duration-200 flex justify-between items-center">
-                <span>✅ Normal Operation</span>
-                <span className="font-mono bg-green-500/10 px-2 py-0.5 rounded text-green-300">3.200 V</span>
-              </button>
-              <button onClick={() => push(1.85)} className="w-full bg-orange-500/10 hover:bg-orange-500/20 active:scale-[0.98] text-orange-400 border border-orange-500/30 rounded-lg px-3 py-2.5 text-xs font-semibold transition-all duration-200 flex justify-between items-center">
-                <span>⚠️ Under-Voltage Fault</span>
-                <span className="font-mono bg-orange-500/10 px-2 py-0.5 rounded text-orange-300">1.850 V</span>
-              </button>
-              <button onClick={() => push(4.75)} className="w-full bg-red-500/10 hover:bg-red-500/20 active:scale-[0.98] text-red-400 border border-red-500/30 rounded-lg px-3 py-2.5 text-xs font-semibold transition-all duration-200 flex justify-between items-center">
-                <span>🚨 Over-Voltage Fault</span>
-                <span className="font-mono bg-red-500/10 px-2 py-0.5 rounded text-red-300">4.750 V</span>
-              </button>
-              <button
-                onClick={() => setIsAutoSim(p => !p)}
-                className={`w-full rounded-lg px-3 py-2.5 text-xs font-semibold transition-all duration-200 border flex items-center gap-2 ${
-                  isAutoSim ? "bg-[#00bfff]/15 hover:bg-[#00bfff]/25 text-[#00bfff] border-[#00bfff]/40" : "bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] border-[#30363d]"
-                }`}
-              >
-                {isAutoSim ? (
-                  <>
-                    <span className="relative flex h-2 w-2 flex-shrink-0">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00bfff] opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-[#00bfff]" />
-                    </span>
-                    ⏹ Stop Simulation
-                    <span className="ml-auto text-[10px] text-[#00bfff]/60 font-mono">every 3s</span>
-                  </>
-                ) : (
-                  <>🔄 Auto Simulate <span className="ml-auto text-[10px] text-[#484f58] font-mono">85% / 15%</span></>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* §4 Session stats */}
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4">
-            <SecLabel text="§4 — Session Statistics" tooltip={{
-              title: "Session Statistics — Use Case",
-              rows: [
-                { icon: "📊", label: "Total / Normal / Faults", text: "Running count of all readings pushed this session. A healthy installation should show < 5% fault rate." },
-                { icon: "⏱️", label: "Uptime", text: "MM:SS since page load. In production: STM32 power-on time. Resets or reboots visible here." },
-                { icon: "📉", label: "Fault rate bar", text: "Visual bar. Orange < 20% fault rate; Red ≥ 20% triggers maintenance escalation in the production system." },
-              ],
-            }} />
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { label: "Total Readings", value: stats.total,  color: "text-[#c9d1d9]" },
-                { label: "Normal",         value: stats.normal, color: "text-green-400" },
-                { label: "Faults",         value: stats.faults, color: "text-red-400" },
-                { label: "Uptime",         value: fmt(uptime),  color: "text-[#00bfff]" },
-              ].map(({ label, value, color }) => (
-                <div key={label} className="bg-[#0d1117] rounded-lg p-3 border border-[#30363d]">
-                  <div className="text-[#8b949e] text-[10px] mb-1">{label}</div>
-                  <div className={`font-mono font-bold text-2xl ${color} tabular-nums`}>{value}</div>
-                </div>
-              ))}
-            </div>
-            {stats.total > 0 && (
-              <div className="mt-3">
-                <div className="flex justify-between text-[10px] text-[#8b949e] mb-1">
-                  <span>Fault Rate</span>
-                  <span className={`font-mono font-semibold ${stats.faults/stats.total > 0.2 ? "text-red-400" : "text-[#8b949e]"}`}>
-                    {((stats.faults/stats.total)*100).toFixed(1)}%
-                  </span>
-                </div>
-                <div className="h-1.5 bg-[#21262d] rounded-full overflow-hidden">
-                  <div className="h-full rounded-full transition-all duration-500"
-                    style={{
-                      width: `${(stats.faults/stats.total)*100}%`,
-                      background: stats.faults/stats.total > 0.2 ? "#ef4444" : "#f59e0b",
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* §5 Reset */}
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4">
-            <SecLabel text="§5 — Session Control" tooltip={{
-              title: "Reset — Use Case",
-              rows: [
-                { icon: "🗑️", label: "What it clears", text: "Clears chart, alert log, SMS preview, session stats and resets uptime. Does not reload the page." },
-                { icon: "⚠️", label: "Two-click safety", text: "Requires two clicks to prevent accidental data loss mid-presentation." },
-              ],
-            }} />
-            <button onClick={handleReset} className={`w-full rounded-lg px-4 py-2.5 text-xs font-bold transition-all duration-200 border ${
-              resetConfirm ? "bg-red-500/15 border-red-500/50 text-red-400 hover:bg-red-500/25" : "bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] border-[#30363d]"
-            }`}>
-              {resetConfirm ? "⚠️ Sure? Click again to clear all data" : "🗑️ Clear Session Data"}
-            </button>
-            {resetConfirm && <div className="mt-2 text-[10px] text-[#8b949e] text-center">Clears chart, alert log, SMS and stats.</div>}
-          </div>
-
-          {/* Live state display */}
-          <div className={`rounded-xl p-4 border transition-all duration-300 ${
-            anyFault ? "bg-red-950/20 border-red-500/40 shadow-[0_0_20px_rgba(239,68,68,0.2)]" : "bg-[#161b22] border-[#30363d]"
-          }`}>
-            <div className="flex items-center gap-1.5 mb-3">
-              <span className="text-[#8b949e] text-[10px] font-semibold uppercase tracking-widest">Current Dashboard State</span>
-              <InfoTooltip position="top" title="Live State — Use Case" rows={[
-                { icon: "🖥️", text: "Compact mirror of the left panel — confirms what reading is currently active without scrolling." },
-                { icon: "🔴", text: "Red border + glow = fault active. Green = within safe range." },
-              ]} />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="text-center">
-                <div className="text-[#8b949e] text-[9px] uppercase mb-1">Voltage</div>
-                <div className={`font-mono text-2xl font-bold tabular-nums ${vFault ? "text-red-400" : "text-[#00bfff]"}`}>{voltage.toFixed(3)}<span className="text-sm"> V</span></div>
-                <div className="flex justify-center mt-1"><LED on={!vFault} fault={vFault} size="md" /></div>
-              </div>
-              <div className="text-center">
-                <div className="text-[#8b949e] text-[9px] uppercase mb-1">Current</div>
-                <div className={`font-mono text-2xl font-bold tabular-nums ${iFault ? "text-red-400" : "text-emerald-400"}`}>{current.toFixed(3)}<span className="text-sm"> A</span></div>
-                <div className="flex justify-center mt-1"><LED on={!iFault} fault={iFault} size="md" /></div>
-              </div>
-            </div>
-            <div className={`text-center text-xs font-bold mt-3 ${anyFault ? "text-red-400 fault-blink" : "text-green-400"}`}>
-              {anyFault ? `⚠ FAULT — ${activeFaults[0]}` : "✓ All Parameters in Safe Range"}
-            </div>
-          </div>
-        </div>
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/upload" element={<UploadPanel />} />
+    </Routes>
   );
 }
