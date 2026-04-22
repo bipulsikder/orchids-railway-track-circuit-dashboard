@@ -196,8 +196,8 @@ function SMSCard({ log }) {
 // ══════════════════════════════════════════════════════════════════════════════
 function Dashboard() {
   const [history, setHistory]       = useState([]);
-  const [voltage, setVoltage]       = useState(3.24);
-  const [current, setCurrent]       = useState(1.12);
+  const [voltage, setVoltage]       = useState(null);
+  const [current, setCurrent]       = useState(null);
   const [alertLog, setAlertLog]     = useState([]);
   const [stats, setStats]           = useState({ total: 0, normal: 0, faults: 0 });
   const [isAutoSim, setIsAutoSim]   = useState(false);
@@ -245,7 +245,7 @@ function Dashboard() {
     let alerts = [];
     let t = 0, n = 0, f = 0;
     let lastAlert = null;
-    let latestV = 3.24, latestI = 1.12;
+    let latestV = null, latestI = null;
 
     chartRows.forEach((r, idx) => {
       const v = parseFloat(r.voltage);
@@ -362,8 +362,8 @@ function Dashboard() {
         setAlertLog([]);
         setStats({ total: 0, normal: 0, faults: 0 });
         setLastSMS(null);
-        setVoltage(3.24);
-        setCurrent(1.12);
+        setVoltage(null);
+        setCurrent(null);
         setSlider(3.24);
         setInputVal("3.240");
       }
@@ -415,7 +415,7 @@ function Dashboard() {
     push(v);
   };
 
-  const handleReset = () => {
+  const handleHardReset = async () => {
     if (!resetConfirm) {
       setResetConfirm(true);
       resetRef.current = setTimeout(() => setResetConfirm(false), 3000);
@@ -423,16 +423,34 @@ function Dashboard() {
     }
     clearTimeout(resetRef.current);
     setResetConfirm(false);
-    setHistory([]); setVoltage(3.24); setCurrent(1.12);
-    setAlertLog([]); setStats({ total:0, normal:0, faults:0 });
-    setSlider(3.24); setInputVal("3.240");
-    setAlarmOn(false); setLastSMS(null);
+
+    // Delete from Supabase
+    const { error } = await supabase
+      .from('telemetry')
+      .delete()
+      .eq('circuit_id', selectedCircuitId);
+
+    if (error) {
+      console.error("Reset error:", error);
+      return;
+    }
+
+    // Clear local state
+    setHistory([]);
+    setVoltage(null);
+    setCurrent(null);
+    setAlertLog([]);
+    setStats({ total: 0, normal: 0, faults: 0 });
+    setSlider(3.24);
+    setInputVal("3.240");
+    setAlarmOn(false);
+    setLastSMS(null);
     prevFault.current = false;
     startT.current = Date.now();
   };
 
-  const vFault  = isVFault(voltage);
-  const iFault  = isIFault(current);
+  const vFault  = voltage !== null && isVFault(voltage);
+  const iFault  = current !== null && isIFault(current);
   const anyFault = vFault || iFault;
   const sliderSafe = !isVFault(slider);
   const activeFaults = [
@@ -455,18 +473,31 @@ function Dashboard() {
         </div>
         <div className="flex items-center gap-6">
           
-          <select 
-            value={selectedCircuitId}
-            onChange={(e) => setSelectedCircuitId(parseInt(e.target.value))}
-            className="bg-[#0d1117] text-[#00bfff] text-xs font-bold font-mono px-3 py-1.5 rounded-lg border border-[#30363d] focus:outline-none focus:border-[#00bfff]/60 transition-all cursor-pointer"
-          >
-            {TRACK_CIRCUITS.map(c => (
-              <option key={c.id} value={c.id}>{c.name.toUpperCase()} • {c.section}</option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            <select 
+              value={selectedCircuitId}
+              onChange={(e) => setSelectedCircuitId(parseInt(e.target.value))}
+              className="bg-[#0d1117] text-[#00bfff] text-xs font-bold font-mono px-3 py-1.5 rounded-lg border border-[#30363d] focus:outline-none focus:border-[#00bfff]/60 transition-all cursor-pointer"
+            >
+              {TRACK_CIRCUITS.map(c => (
+                <option key={c.id} value={c.id}>{c.name.toUpperCase()} • {c.section}</option>
+              ))}
+            </select>
+            
+            <button
+              onClick={handleHardReset}
+              className={`text-[10px] font-bold px-3 py-1.5 rounded-lg border transition-all ${
+                resetConfirm 
+                  ? "bg-red-500 text-white border-red-400" 
+                  : "bg-red-500/10 text-red-400 border-red-500/30 hover:bg-red-500/20"
+              }`}
+            >
+              {resetConfirm ? "CONFIRM RESET?" : "HARD RESET"}
+            </button>
+          </div>
 
           <div className="flex items-center gap-3">
-            <LED on={!anyFault} fault={anyFault} size="md" />
+            <LED on={voltage !== null && !anyFault} fault={anyFault} size="md" />
           <LiveDot />
           <InfoTooltip position="bottom" title="System Status Indicator" rows={[
             { icon: "🟢", label: "Green LED", text: "Both voltage (2.4–4.0V) and current (0.5–1.5A) are within safe operating range. Track section is clear and all systems normal." },
@@ -509,11 +540,11 @@ function Dashboard() {
                     ],
                   }} />
                 </div>
-                <LED on={!vFault} fault={vFault} size="lg" />
+                <LED on={voltage !== null && !vFault} fault={vFault} size="lg" />
               </div>
 
               <div className={`font-mono text-5xl font-bold tabular-nums transition-all duration-300 mb-2 ${vFault ? "text-red-400" : "text-[#00bfff]"}`}>
-                {voltage.toFixed(3)}<span className="text-2xl font-normal ml-1 opacity-70">V</span>
+                {voltage !== null ? voltage.toFixed(3) : "---"}<span className="text-2xl font-normal ml-1 opacity-70">V</span>
               </div>
 
               {/* Range bar */}
@@ -525,18 +556,19 @@ function Dashboard() {
                   <div className="absolute left-[40%] right-[33.3%] h-full bg-green-500/20 border-l border-r border-green-500/40" />
                   <div
                     className={`absolute top-0.5 bottom-0.5 w-2 -ml-1 rounded-full transition-all duration-300 ${vFault ? "bg-red-500 shadow-[0_0_6px_#ef4444]" : "bg-[#00bfff] shadow-[0_0_6px_#00bfff]"}`}
-                    style={{ left: `${(voltage / 6) * 100}%` }}
+                    style={{ left: `${voltage !== null ? (voltage / 6) * 100 : 0}%` }}
                   />
                 </div>
               </div>
 
               <div className="flex items-center justify-between">
                 <span className={`text-[10px] px-2.5 py-1 rounded-full border font-semibold transition-all duration-300 ${
+                  voltage === null ? "bg-[#21262d] text-[#8b949e] border-[#30363d]" :
                   vFault
                     ? "bg-red-500/10 text-red-400 border-red-500/30 fault-blink"
                     : "bg-green-500/10 text-green-400 border-green-500/30"
                 }`}>
-                  {vFault ? `🔴 ${vFaultType(voltage)}` : "🟢 Voltage in Range"}
+                  {voltage === null ? "⚪ Waiting for Data..." : vFault ? `🔴 ${vFaultType(voltage)}` : "🟢 Voltage in Range"}
                 </span>
                 <span className="text-[#484f58] text-[10px] font-mono">Safe: 2.4 – 4.0 V</span>
               </div>
@@ -560,11 +592,11 @@ function Dashboard() {
                     ],
                   }} />
                 </div>
-                <LED on={!iFault} fault={iFault} size="lg" />
+                <LED on={current !== null && !iFault} fault={iFault} size="lg" />
               </div>
 
               <div className={`font-mono text-5xl font-bold tabular-nums transition-all duration-300 mb-2 ${iFault ? "text-red-400" : "text-emerald-400"}`}>
-                {current.toFixed(3)}<span className="text-2xl font-normal ml-1 opacity-70">A</span>
+                {current !== null ? current.toFixed(3) : "---"}<span className="text-2xl font-normal ml-1 opacity-70">A</span>
               </div>
 
               {/* Range bar */}
@@ -576,18 +608,19 @@ function Dashboard() {
                   <div className="absolute left-[25%] right-[25%] h-full bg-green-500/20 border-l border-r border-green-500/40" />
                   <div
                     className={`absolute top-0.5 bottom-0.5 w-2 -ml-1 rounded-full transition-all duration-300 ${iFault ? "bg-red-500 shadow-[0_0_6px_#ef4444]" : "bg-emerald-400 shadow-[0_0_6px_#34d399]"}`}
-                    style={{ left: `${Math.min((current / 2) * 100, 98)}%` }}
+                    style={{ left: `${current !== null ? Math.min((current / 2) * 100, 98) : 0}%` }}
                   />
                 </div>
               </div>
 
               <div className="flex items-center justify-between">
                 <span className={`text-[10px] px-2.5 py-1 rounded-full border font-semibold transition-all duration-300 ${
+                  current === null ? "bg-[#21262d] text-[#8b949e] border-[#30363d]" :
                   iFault
                     ? "bg-red-500/10 text-red-400 border-red-500/30 fault-blink"
                     : "bg-green-500/10 text-green-400 border-green-500/30"
                 }`}>
-                  {iFault ? `🔴 ${iFaultType(current)}` : "🟢 Current in Range"}
+                  {current === null ? "⚪ Waiting for Data..." : iFault ? `🔴 ${iFaultType(current)}` : "🟢 Current in Range"}
                 </span>
                 <span className="text-[#484f58] text-[10px] font-mono">Safe: 0.50 – 1.50 A</span>
               </div>
@@ -610,14 +643,16 @@ function Dashboard() {
                 ],
               }} />
               <div className="flex items-center gap-2">
-                <LED on={!anyFault} fault={anyFault} size="md" />
-                {anyFault
-                  ? <div className="text-red-400 font-bold text-sm fault-blink">❌ DE-ENERGISED</div>
-                  : <div className="text-green-400 font-bold text-sm">⚡ ENERGISED</div>
+                <LED on={voltage !== null && !anyFault} fault={anyFault} size="md" />
+                {voltage === null 
+                  ? <div className="text-[#484f58] font-bold text-sm">⚪ WAITING...</div>
+                  : anyFault
+                    ? <div className="text-red-400 font-bold text-sm fault-blink">❌ DE-ENERGISED</div>
+                    : <div className="text-green-400 font-bold text-sm">⚡ ENERGISED</div>
                 }
               </div>
-              <div className={`text-[10px] w-fit px-2 py-0.5 rounded-full border ${anyFault ? "bg-red-500/10 text-red-400 border-red-500/30" : "bg-green-500/10 text-green-400 border-green-500/30"}`}>
-                {anyFault ? "Signal: RED 🔴" : "Signal: GREEN 🟢"}
+              <div className={`text-[10px] w-fit px-2 py-0.5 rounded-full border ${voltage === null ? "bg-[#21262d] text-[#8b949e] border-[#30363d]" : anyFault ? "bg-red-500/10 text-red-400 border-red-500/30" : "bg-green-500/10 text-green-400 border-green-500/30"}`}>
+                {voltage === null ? "Signal: N/A" : anyFault ? "Signal: RED 🔴" : "Signal: GREEN 🟢"}
               </div>
               <div className="text-[#484f58] text-[10px] uppercase font-bold">{currentCircuit.name}</div>
             </div>
@@ -635,16 +670,18 @@ function Dashboard() {
                 ],
               }} />
               <div className="flex items-center gap-2">
-                <LED on={!anyFault} fault={anyFault} size="md" />
-                {anyFault
-                  ? <div className="text-red-400 font-bold text-sm fault-blink">🚨 FAULT DETECTED</div>
-                  : <div className="text-green-400 font-bold text-sm">✅ NORMAL</div>
+                <LED on={voltage !== null && !anyFault} fault={anyFault} size="md" />
+                {voltage === null
+                  ? <div className="text-[#484f58] font-bold text-sm">⚪ WAITING...</div>
+                  : anyFault
+                    ? <div className="text-red-400 font-bold text-sm fault-blink">🚨 FAULT DETECTED</div>
+                    : <div className="text-green-400 font-bold text-sm">✅ NORMAL</div>
                 }
               </div>
               {anyFault && activeFaults.map((f, i) => (
                 <div key={i} className="text-orange-400 text-[10px] font-mono font-semibold bg-orange-500/10 px-2 py-0.5 rounded border border-orange-500/20">{f}</div>
               ))}
-              {!anyFault && <div className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded">Track clear — proceed</div>}
+              {!anyFault && voltage !== null && <div className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded">Track clear — proceed</div>}
             </div>
 
             {/* Location */}
@@ -749,7 +786,7 @@ function Dashboard() {
 
             {alertLog.length === 0 ? (
               <div className="text-[#484f58] text-sm text-center py-8 flex flex-col items-center gap-2">
-                <LED on size="lg" />
+                <LED on={voltage !== null} size="lg" />
                 <span>No faults recorded in this session</span>
               </div>
             ) : (
