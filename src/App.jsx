@@ -422,6 +422,20 @@ function Dashboard() {
         const row = payload.new;
         push(parseFloat(row.voltage), parseFloat(row.current));
       })
+      .on('postgres_changes', {
+        event: 'DELETE',
+        schema: 'public',
+        table: 'telemetry',
+        filter: `circuit_id=eq.${selectedCircuitId}`
+      }, () => {
+        // Clear UI if records are deleted from database
+        setHistory([]);
+        setAlertLog([]);
+        setStats({ total: 0, normal: 0, faults: 0 });
+        setLastSMS(null);
+        setVoltage(null);
+        setCurrent(null);
+      })
       .subscribe();
 
     return () => {
