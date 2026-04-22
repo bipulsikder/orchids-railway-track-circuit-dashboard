@@ -237,6 +237,64 @@ function Dashboard() {
 
   const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
 
+  // ── Load historical telemetry ──
+  const loadTelemetry = useCallback((rows) => {
+    const chartRows = [...rows].reverse();
+    
+    let hist = [];
+    let alerts = [];
+    let t = 0, n = 0, f = 0;
+    let lastAlert = null;
+    let latestV = 3.24, latestI = 1.12;
+
+    chartRows.forEach((r, idx) => {
+      const v = parseFloat(r.voltage);
+      const i = parseFloat(r.current);
+      const fault = r.is_fault;
+      const vBad = isVFault(v);
+      const iBad = isIFault(i);
+      
+      const d = new Date(r.created_at);
+      const timeStr = d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
+      const dtStr = d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+      
+      hist.push({ voltage: v, current: i, timestamp: timeStr, isFault: fault });
+      t++;
+      if (fault) { f++; } else { n++; }
+      
+      if (fault) {
+        const faultsArr = [];
+        if (vBad) faultsArr.push(`${vFaultType(v)} (${v.toFixed(3)}V)`);
+        if (iBad) faultsArr.push(`${iFaultType(i)} (${i.toFixed(3)}A)`);
+        
+        const entry = {
+          id: r.id,
+          ts: timeStr, dateTime: dtStr,
+          voltage: v, current: i,
+          faultType: vBad ? vFaultType(v) : iFaultType(i),
+          faults: faultsArr,
+          gps: TRACK_CIRCUITS.find(c => c.id === r.circuit_id) || TRACK_CIRCUITS[0]
+        };
+        alerts.unshift(entry);
+        lastAlert = entry;
+      }
+      
+      if (idx === chartRows.length - 1) {
+        latestV = v;
+        latestI = i;
+      }
+    });
+
+    setHistory(hist.slice(-MAX_HISTORY));
+    setAlertLog(alerts);
+    setStats({ total: t, normal: n, faults: f });
+    setVoltage(latestV);
+    setCurrent(latestI);
+    setSlider(latestV);
+    setInputVal(latestV.toFixed(3));
+    setLastSMS(lastAlert);
+  }, []);
+
   // ── Core push ──
   const push = useCallback((v, iOverride) => {
     if (isNaN(v)) return;
@@ -284,28 +342,53 @@ function Dashboard() {
     }
 
     setStats(p => ({ total: p.total+1, normal: p.normal+(fault?0:1), faults: p.faults+(fault?1:0) }));
-  }, []);
+  }, [currentCircuit]);
 
-  // Sync state with Supabase Realtime to respond to /upload tab pushes globally
+  // Sync state with Supabase Realtime Postgres Changes
   useEffect(() => {
-    const channel = supabase.channel('track-telemetry', {
-      config: { broadcast: { ack: true } }
-    });
-    
-    channel.on('broadcast', { event: 'push_reading' }, (payload) => {
-      console.log('Dashboard received payload:', payload);
-      const { v, i } = payload.payload;
-      if (typeof v === 'number' && typeof i === 'number') {
-        push(v, i);
+    const fetchHistory = async () => {
+      const { data, error } = await supabase
+        .from('telemetry')
+        .select('*')
+        .eq('circuit_id', selectedCircuitId)
+        .order('created_at', { ascending: false })
+        .limit(MAX_HISTORY);
+        
+      if (data && data.length > 0) {
+        loadTelemetry(data);
+      } else {
+        // Reset if no data
+        setHistory([]);
+        setAlertLog([]);
+        setStats({ total: 0, normal: 0, faults: 0 });
+        setLastSMS(null);
+        setVoltage(3.24);
+        setCurrent(1.12);
+        setSlider(3.24);
+        setInputVal("3.240");
       }
-    }).subscribe(status => {
-      console.log('Dashboard Broadcast Status:', status);
-    });
+    };
+    
+    prevFault.current = false;
+    setAlarmOn(false);
+    fetchHistory();
+
+    const channel = supabase.channel(`telemetry-${selectedCircuitId}`)
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'telemetry', 
+        filter: `circuit_id=eq.${selectedCircuitId}` 
+      }, (payload) => {
+        const row = payload.new;
+        push(parseFloat(row.voltage), parseFloat(row.current));
+      })
+      .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [push]);
+  }, [selectedCircuitId, loadTelemetry, push]);
 
   // Auto sim
   useEffect(() => {

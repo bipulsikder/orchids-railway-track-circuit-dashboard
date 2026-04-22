@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { currentFromVoltage, randomNormal } from "../constants";
+import { useState } from "react";
+import { currentFromVoltage, randomNormal, TRACK_CIRCUITS, isVFault, isIFault } from "../constants";
 import { supabase } from "../supabaseClient";
 
 export default function UploadPanel() {
@@ -7,21 +7,7 @@ export default function UploadPanel() {
     { id: Date.now(), voltage: 3.24, current: 1.12 }
   ]);
   const [toast, setToast] = useState(false);
-  const channelRef = useRef(null);
-
-  useEffect(() => {
-    const channel = supabase.channel('track-telemetry', {
-      config: { broadcast: { ack: true } }
-    });
-    channel.subscribe(status => {
-      console.log('Upload Panel Broadcast Status:', status);
-    });
-    channelRef.current = channel;
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
+  const [selectedCircuitId, setSelectedCircuitId] = useState(TRACK_CIRCUITS[0].id);
 
   const handleAddMore = () => {
     const v = randomNormal();
@@ -37,15 +23,22 @@ export default function UploadPanel() {
     const v = parseFloat(row.voltage);
     const i = parseFloat(row.current);
     if (!isNaN(v) && !isNaN(i)) {
-      const resp = await channelRef.current?.send({
-        type: 'broadcast',
-        event: 'push_reading',
-        payload: { v, i, stamp: Date.now() }
-      });
-      console.log('Broadcast response:', resp);
-      // Show toast
-      setToast(true);
-      setTimeout(() => setToast(false), 1500);
+      const is_fault = isVFault(v) || isIFault(i);
+      
+      const { error } = await supabase.from('telemetry').insert([{
+        circuit_id: selectedCircuitId,
+        voltage: v,
+        current: i,
+        is_fault
+      }]);
+      
+      if (error) {
+        console.error("Insert error:", error);
+      } else {
+        // Show toast
+        setToast(true);
+        setTimeout(() => setToast(false), 1500);
+      }
     }
   };
 
@@ -58,15 +51,30 @@ export default function UploadPanel() {
               <span className="text-2xl">🎛️</span> Operator Upload Panel
             </h1>
             <p className="text-[#8b949e] text-xs mt-1">
-              Test data injection across all active track circuits.
+              Inject fault telemetry into the PostgreSQL database.
             </p>
           </div>
-          <button 
-            onClick={handleAddMore}
-            className="bg-[#00bfff]/10 hover:bg-[#00bfff]/20 text-[#00bfff] border border-[#00bfff]/40 rounded-lg px-4 py-2 text-sm font-bold transition-all duration-200"
-          >
-            + Add More
-          </button>
+          
+          <div className="flex items-center gap-4">
+            <select
+              value={selectedCircuitId}
+              onChange={(e) => setSelectedCircuitId(Number(e.target.value))}
+              className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#c9d1d9] focus:outline-none focus:border-[#58a6ff] transition-colors"
+            >
+              {TRACK_CIRCUITS.map(c => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            
+            <button 
+              onClick={handleAddMore}
+              className="bg-[#00bfff]/10 hover:bg-[#00bfff]/20 text-[#00bfff] border border-[#00bfff]/40 rounded-lg px-4 py-2 text-sm font-bold transition-all duration-200"
+            >
+              + Add More
+            </button>
+          </div>
         </div>
 
         <div className="space-y-4">
