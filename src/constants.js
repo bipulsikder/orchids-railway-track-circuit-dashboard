@@ -10,10 +10,10 @@ export const TRACK_CIRCUITS = [
   { id: 3, name: "track circuit 3", section: "T-16", lat: "22.2806", lon: "73.2002" }
 ];
 
-export function isVFault(v)  { return v < V_MIN || v > V_MAX; }
-export function isIFault(i)  { return i < I_MIN || i > I_MAX; }
-export function vFaultType(v){ return v < V_MIN ? "UNDER-VOLTAGE" : "OVER-VOLTAGE"; }
-export function iFaultType(i){ return i < I_MIN ? "UNDER-CURRENT" : "OVER-CURRENT"; }
+export function isVFault(v, min = V_MIN, max = V_MAX)  { return v < min || v > max; }
+export function isIFault(i, min = I_MIN, max = I_MAX)  { return i < min || i > max; }
+export function vFaultType(v, min = V_MIN){ return v < min ? "UNDER-VOLTAGE" : "OVER-VOLTAGE"; }
+export function iFaultType(i, min = I_MIN){ return i < min ? "UNDER-CURRENT" : "OVER-CURRENT"; }
 
 export function ts() {
   return new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });

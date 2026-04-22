@@ -9,6 +9,24 @@ export default function UploadPanel() {
   const [toast, setToast] = useState(false);
   const [selectedCircuitId, setSelectedCircuitId] = useState(TRACK_CIRCUITS[0].id);
 
+  // System Thresholds
+  const [thresholds, setThresholds] = useState({ vMin: 2.4, vMax: 4.0, iMin: 0.5, iMax: 1.5 });
+
+  useState(() => {
+    const fetchThresholds = async () => {
+      const { data } = await supabase.from('thresholds').select('*').eq('id', 1).single();
+      if (data) {
+        setThresholds({
+          vMin: data.v_min,
+          vMax: data.v_max,
+          iMin: data.i_min,
+          iMax: data.i_max
+        });
+      }
+    };
+    fetchThresholds();
+  }, []);
+
   const handleAddMore = () => {
     const v = randomNormal();
     const i = currentFromVoltage(v);
@@ -23,7 +41,7 @@ export default function UploadPanel() {
     const v = parseFloat(row.voltage);
     const i = parseFloat(row.current);
     if (!isNaN(v) && !isNaN(i)) {
-      const is_fault = isVFault(v) || isIFault(i);
+      const is_fault = isVFault(v, thresholds.vMin, thresholds.vMax) || isIFault(i, thresholds.iMin, thresholds.iMax);
       
       const { error } = await supabase.from('telemetry').insert([{
         circuit_id: selectedCircuitId,

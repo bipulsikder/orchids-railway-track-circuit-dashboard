@@ -213,6 +213,14 @@ function Dashboard() {
   const [selectedCircuitId, setSelectedCircuitId] = useState(1);
   const currentCircuit = TRACK_CIRCUITS.find(c => c.id === selectedCircuitId) || TRACK_CIRCUITS[0];
 
+  // Thresholds State
+  const [vMin, setVMin] = useState(V_MIN);
+  const [vMax, setVMax] = useState(V_MAX);
+  const [iMin, setIMin] = useState(I_MIN);
+  const [iMax, setIMax] = useState(I_MAX);
+  const [showSettings, setShowSettings] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const autoRef  = useRef(null);
   const resetRef = useRef(null);
   const startT   = useRef(Date.now());
@@ -237,6 +245,37 @@ function Dashboard() {
 
   const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
 
+  // Fetch thresholds on mount
+  useEffect(() => {
+    const fetchThresholds = async () => {
+      const { data, error } = await supabase.from('thresholds').select('*').eq('id', 1).single();
+      if (data) {
+        setVMin(data.v_min);
+        setVMax(data.v_max);
+        setIMin(data.i_min);
+        setIMax(data.i_max);
+      }
+    };
+    fetchThresholds();
+  }, []);
+
+  const saveThresholds = async () => {
+    setIsSyncing(true);
+    const { error } = await supabase.from('thresholds').upsert({
+      id: 1,
+      v_min: vMin,
+      v_max: vMax,
+      i_min: iMin,
+      i_max: iMax,
+      updated_at: new Date()
+    });
+    setIsSyncing(false);
+    if (!error) {
+      setToast(true);
+      setTimeout(() => setToast(false), 2000);
+    }
+  };
+
   // ── Load historical telemetry ──
   const loadTelemetry = useCallback((rows) => {
     const chartRows = [...rows].reverse();
@@ -251,8 +290,8 @@ function Dashboard() {
       const v = parseFloat(r.voltage);
       const i = parseFloat(r.current);
       const fault = r.is_fault;
-      const vBad = isVFault(v);
-      const iBad = isIFault(i);
+      const vBad = isVFault(v, vMin, vMax);
+      const iBad = isIFault(i, iMin, iMax);
       
       const d = new Date(r.created_at);
       const timeStr = d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
@@ -264,14 +303,14 @@ function Dashboard() {
       
       if (fault) {
         const faultsArr = [];
-        if (vBad) faultsArr.push(`${vFaultType(v)} (${v.toFixed(3)}V)`);
-        if (iBad) faultsArr.push(`${iFaultType(i)} (${i.toFixed(3)}A)`);
+        if (vBad) faultsArr.push(`${vFaultType(v, vMin)} (${v.toFixed(3)}V)`);
+        if (iBad) faultsArr.push(`${iFaultType(i, iMin)} (${i.toFixed(3)}A)`);
         
         const entry = {
           id: r.id,
           ts: timeStr, dateTime: dtStr,
           voltage: v, current: i,
-          faultType: vBad ? vFaultType(v) : iFaultType(i),
+          faultType: vBad ? vFaultType(v, vMin) : iFaultType(i, iMin),
           faults: faultsArr,
           gps: TRACK_CIRCUITS.find(c => c.id === r.circuit_id) || TRACK_CIRCUITS[0]
         };
@@ -293,14 +332,14 @@ function Dashboard() {
     setSlider(latestV);
     setInputVal(latestV.toFixed(3));
     setLastSMS(lastAlert);
-  }, []);
+  }, [vMin, vMax, iMin, iMax]);
 
   // ── Core push ──
   const push = useCallback((v, iOverride) => {
     if (isNaN(v)) return;
     const i   = iOverride ?? currentFromVoltage(v);
-    const vBad = isVFault(v);
-    const iBad = isIFault(i);
+    const vBad = isVFault(v, vMin, vMax);
+    const iBad = isIFault(i, iMin, iMax);
     const fault = vBad || iBad;
     const now  = ts();
     const nowDT = tsDate();
@@ -316,8 +355,8 @@ function Dashboard() {
 
     if (fault) {
       const faults = [];
-      if (vBad) faults.push(`${vFaultType(v)} (${v.toFixed(3)}V)`);
-      if (iBad) faults.push(`${iFaultType(i)} (${i.toFixed(3)}A)`);
+      if (vBad) faults.push(`${vFaultType(v, vMin)} (${v.toFixed(3)}V)`);
+      if (iBad) faults.push(`${iFaultType(i, iMin)} (${i.toFixed(3)}A)`);
 
       if (!prevFault.current) {
         setDashFlash(true);
@@ -330,7 +369,7 @@ function Dashboard() {
       const entry = {
         id: ++alertId.current, ts: now, dateTime: nowDT,
         voltage: v, current: i,
-        faultType: vBad ? vFaultType(v) : iFaultType(i),
+        faultType: vBad ? vFaultType(v, vMin) : iFaultType(i, iMin),
         faults,
         gps: currentCircuit
       };
@@ -342,7 +381,7 @@ function Dashboard() {
     }
 
     setStats(p => ({ total: p.total+1, normal: p.normal+(fault?0:1), faults: p.faults+(fault?1:0) }));
-  }, [currentCircuit]);
+  }, [currentCircuit, vMin, vMax, iMin, iMax]);
 
   // Sync state with Supabase Realtime Postgres Changes
   useEffect(() => {
@@ -449,13 +488,13 @@ function Dashboard() {
     startT.current = Date.now();
   };
 
-  const vFault  = voltage !== null && isVFault(voltage);
-  const iFault  = current !== null && isIFault(current);
+  const vFault  = voltage !== null && isVFault(voltage, vMin, vMax);
+  const iFault  = current !== null && isIFault(current, iMin, iMax);
   const anyFault = vFault || iFault;
-  const sliderSafe = !isVFault(slider);
+  const sliderSafe = !isVFault(slider, vMin, vMax);
   const activeFaults = [
-    ...(vFault ? [`${vFaultType(voltage)} — ${voltage.toFixed(3)}V`] : []),
-    ...(iFault ? [`${iFaultType(current)} — ${current.toFixed(3)}A`] : []),
+    ...(vFault ? [`${vFaultType(voltage, vMin)} — ${voltage.toFixed(3)}V`] : []),
+    ...(iFault ? [`${iFaultType(current, iMin)} — ${current.toFixed(3)}A`] : []),
   ];
 
   return (
@@ -505,12 +544,95 @@ function Dashboard() {
             { icon: "📡", label: "LIVE indicator", text: "Dashboard is connected and receiving data. In production this reflects the 4G link to the STM32 field unit." },
           ]} />
           </div>
+          
+          <button 
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-2 rounded-lg border transition-all ${showSettings ? "bg-[#00bfff]/20 border-[#00bfff]/50 text-[#00bfff]" : "bg-[#161b22] border-[#30363d] text-[#8b949e] hover:border-[#484f58]"}`}
+            title="System Configuration"
+          >
+            <span className="text-lg">⚙️</span>
+          </button>
         </div>
         <div className="font-mono text-[#8b949e] text-sm tabular-nums">{clock}</div>
       </nav>
 
-      {/* ══ BODY ══ */}
-      <div className="flex flex-1 min-h-0 container mx-auto max-w-6xl">
+      <div className="flex flex-1 min-h-0 container mx-auto max-w-6xl relative">
+        {/* ████████  SETTINGS MODAL  ████████ */}
+        {showSettings && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 animate-in fade-in duration-300">
+            <div className="absolute inset-0 bg-[#0d1117]/80 backdrop-blur-sm" onClick={() => setShowSettings(false)} />
+            <div className="relative bg-[#161b22] border border-[#30363d] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
+              <div className="p-6 border-b border-[#30363d] flex items-center justify-between">
+                <h2 className="text-white font-bold flex items-center gap-2 text-lg">
+                  <span className="bg-[#00bfff]/10 p-2 rounded-lg text-[#00bfff]">⚙️</span> System Calibration
+                </h2>
+                <button onClick={() => setShowSettings(false)} className="text-[#8b949e] hover:text-white transition-colors p-2 hover:bg-white/5 rounded-full">✕</button>
+              </div>
+
+              <div className="p-6 space-y-6">
+                <section>
+                  <div className="text-[11px] font-bold text-[#8b949e] uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#00bfff]" /> Voltage Thresholds (V)
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[10px] text-[#484f58] font-bold uppercase block mb-1.5">Min Safe Range</label>
+                      <input type="number" step="0.1" value={vMin} onChange={e => setVMin(parseFloat(e.target.value))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2 text-sm text-[#00bfff] font-mono focus:outline-none focus:border-[#00bfff]/50 transition-all" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-[#484f58] font-bold uppercase block mb-1.5">Max Safe Range</label>
+                      <input type="number" step="0.1" value={vMax} onChange={e => setVMax(parseFloat(e.target.value))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2 text-sm text-[#00bfff] font-mono focus:outline-none focus:border-[#00bfff]/50 transition-all" />
+                    </div>
+                  </div>
+                </section>
+
+                <section>
+                  <div className="text-[11px] font-bold text-[#8b949e] uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Current Thresholds (A)
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[10px] text-[#484f58] font-bold uppercase block mb-1.5">Min Safe Range</label>
+                      <input type="number" step="0.05" value={iMin} onChange={e => setIMin(parseFloat(e.target.value))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2 text-sm text-emerald-400 font-mono focus:outline-none focus:border-emerald-400/50 transition-all" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-[#484f58] font-bold uppercase block mb-1.5">Max Safe Range</label>
+                      <input type="number" step="0.05" value={iMax} onChange={e => setIMax(parseFloat(e.target.value))} className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2 text-sm text-emerald-400 font-mono focus:outline-none focus:border-emerald-400/50 transition-all" />
+                    </div>
+                  </div>
+                </section>
+
+                <div className="p-4 bg-amber-500/5 rounded-xl border border-amber-500/10 flex gap-3">
+                  <span className="text-amber-500 mt-0.5 text-xs">⚠️</span>
+                  <div className="text-[11px] text-[#8b949e] leading-relaxed">
+                    <strong className="text-amber-500/80 uppercase block mb-0.5 font-bold">Safety Warning</strong>
+                    Updating these values will immediately re-calculate fault status for all active monitoring circuits. Use with caution.
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-6 bg-[#0d1117]/50 border-t border-[#30363d]">
+                <button 
+                  onClick={saveThresholds}
+                  disabled={isSyncing}
+                  className={`w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 ${isSyncing ? "bg-[#30363d] text-[#8b949e] cursor-not-allowed" : "bg-[#00bfff] text-[#0d1117] hover:shadow-[0_0_20px_rgba(0,191,255,0.4)] active:scale-[0.98]"}`}
+                >
+                  {isSyncing ? (
+                    <>
+                      <span className="animate-spin text-lg">⏳</span>
+                      <span>SYNCING TO DATABASE...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>💾</span>
+                      <span>APPLY SYSTEM-WIDE</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ████████  MAIN DASHBOARD  ████████ */}
         <div className={`w-full flex flex-col gap-3 p-4 overflow-y-auto transition-all duration-300`}>
@@ -568,9 +690,9 @@ function Dashboard() {
                     ? "bg-red-500/10 text-red-400 border-red-500/30 fault-blink"
                     : "bg-green-500/10 text-green-400 border-green-500/30"
                 }`}>
-                  {voltage === null ? "⚪ Waiting for Data..." : vFault ? `🔴 ${vFaultType(voltage)}` : "🟢 Voltage in Range"}
+                  {voltage === null ? "⚪ Waiting for Data..." : vFault ? `🔴 ${vFaultType(voltage, vMin)}` : "🟢 Voltage in Range"}
                 </span>
-                <span className="text-[#484f58] text-[10px] font-mono">Safe: 2.4 – 4.0 V</span>
+                <span className="text-[#484f58] text-[10px] font-mono">Safe: {vMin} – {vMax} V</span>
               </div>
             </div>
 
@@ -620,9 +742,9 @@ function Dashboard() {
                     ? "bg-red-500/10 text-red-400 border-red-500/30 fault-blink"
                     : "bg-green-500/10 text-green-400 border-green-500/30"
                 }`}>
-                  {current === null ? "⚪ Waiting for Data..." : iFault ? `🔴 ${iFaultType(current)}` : "🟢 Current in Range"}
+                  {current === null ? "⚪ Waiting for Data..." : iFault ? `🔴 ${iFaultType(current, iMin)}` : "🟢 Current in Range"}
                 </span>
-                <span className="text-[#484f58] text-[10px] font-mono">Safe: 0.50 – 1.50 A</span>
+                <span className="text-[#484f58] text-[10px] font-mono">Safe: {iMin.toFixed(2)} – {iMax.toFixed(2)} A</span>
               </div>
             </div>
           </div>
@@ -734,20 +856,20 @@ function Dashboard() {
               <ResponsiveContainer width="100%" height={240}>
                 <LineChart data={history} margin={{ top: 10, right: 40, left: 0, bottom: 4 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#21262d" vertical={false} />
-                  <XAxis dataKey="timestamp" tick={{ fill: "#8b949e", fontSize: 9, fontFamily: "monospace" }} axisLine={{ stroke: "#30363d" }} tickLine={false} interval="preserveStartEnd" />
-                  <YAxis yAxisId="v" domain={[0, 6]} ticks={[0,1,2,3,4,5,6]} tick={{ fill: "#8b949e", fontSize: 9 }} axisLine={{ stroke: "#30363d" }} tickLine={false} tickFormatter={v => `${v}V`} width={30} />
-                  <YAxis yAxisId="i" orientation="right" domain={[0, 2]} ticks={[0,0.5,1.0,1.5,2.0]} tick={{ fill: "#8b949e", fontSize: 9 }} axisLine={{ stroke: "#30363d" }} tickLine={false} tickFormatter={v => `${v}A`} width={30} />
+                  <XAxis dataKey="timestamp" tick={{ fill: "#8b949e", fontSize: 11, fontFamily: "monospace" }} axisLine={{ stroke: "#30363d" }} tickLine={false} interval="preserveStartEnd" />
+                  <YAxis yAxisId="v" domain={[0, 6]} ticks={[0,1,2,3,4,5,6]} tick={{ fill: "#8b949e", fontSize: 11 }} axisLine={{ stroke: "#30363d" }} tickLine={false} tickFormatter={v => `${v}V`} width={45} />
+                  <YAxis yAxisId="i" orientation="right" domain={[0, 2]} ticks={[0,0.5,1.0,1.5,2.0]} tick={{ fill: "#8b949e", fontSize: 11 }} axisLine={{ stroke: "#30363d" }} tickLine={false} tickFormatter={v => `${v}A`} width={45} />
                   <Tooltip content={<ChartTip />} />
 
                   {/* Voltage safe zone */}
-                  <ReferenceArea yAxisId="v" y1={V_MIN} y2={V_MAX} fill="#22c55e" fillOpacity={0.06} ifOverflow="hidden" />
-                  <ReferenceLine yAxisId="v" y={V_MIN} stroke="#f59e0b" strokeDasharray="6 3" strokeWidth={1.5}
-                    label={{ value: "V-Min (2.4V)", position: "insideTopLeft", fill: "#f59e0b", fontSize: 9, dx: 6, dy: -4 }} />
-                  <ReferenceLine yAxisId="v" y={V_MAX} stroke="#ef4444" strokeDasharray="6 3" strokeWidth={1.5}
-                    label={{ value: "V-Max (4.0V)", position: "insideTopLeft", fill: "#ef4444", fontSize: 9, dx: 6, dy: -4 }} />
+                  <ReferenceArea yAxisId="v" y1={vMin} y2={vMax} fill="#22c55e" fillOpacity={0.06} ifOverflow="hidden" />
+                  <ReferenceLine yAxisId="v" y={vMin} stroke="#f59e0b" strokeDasharray="6 3" strokeWidth={1.5}
+                    label={{ value: `V-Min (${vMin}V)`, position: "insideTopLeft", fill: "#f59e0b", fontSize: 10, dx: 6, dy: -4 }} />
+                  <ReferenceLine yAxisId="v" y={vMax} stroke="#ef4444" strokeDasharray="6 3" strokeWidth={1.5}
+                    label={{ value: `V-Max (${vMax}V)`, position: "insideTopLeft", fill: "#ef4444", fontSize: 10, dx: 6, dy: -4 }} />
 
                   {/* Current safe zone */}
-                  <ReferenceArea yAxisId="i" y1={I_MIN} y2={I_MAX} fill="#34d399" fillOpacity={0.04} ifOverflow="hidden" />
+                  <ReferenceArea yAxisId="i" y1={iMin} y2={iMax} fill="#34d399" fillOpacity={0.04} ifOverflow="hidden" />
 
                   <Line yAxisId="v" type="monotone" dataKey="voltage" stroke="#00bfff" strokeWidth={2}
                     dot={({ cx, cy, payload }) => payload?.isFault
