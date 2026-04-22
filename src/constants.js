@@ -5,9 +5,9 @@ export const I_MAX = 1.50;
 export const MAX_HISTORY = 20;
 
 export const TRACK_CIRCUITS = [
-  { id: 1, name: "track circuit 1", section: "T-14", lat: "19.0760", lon: "72.8777", place: "Mumbai Central Railway Yard" },
-  { id: 2, name: "track circuit 2", section: "T-15", lat: "19.0800", lon: "72.8800", place: "Dadar Junction Yard" },
-  { id: 3, name: "track circuit 3", section: "T-16", lat: "19.0850", lon: "72.8820", place: "Andheri Station Limit" }
+  { id: 1, name: "track circuit 1", section: "T-14", lat: "22.2821", lon: "73.1998" },
+  { id: 2, name: "track circuit 2", section: "T-15", lat: "22.2818", lon: "73.2002" },
+  { id: 3, name: "track circuit 3", section: "T-16", lat: "22.2806", lon: "73.2002" }
 ];
 
 export function isVFault(v)  { return v < V_MIN || v > V_MAX; }
